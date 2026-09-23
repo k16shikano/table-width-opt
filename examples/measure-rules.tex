@@ -1,0 +1,7 @@
+%% Trial-PDF only: horizontal rules thick enough for PDF path extraction.
+\setlength{\arrayrulewidth}{1.6pt}
+
+%% \linewidth marker: 0-height at text-block left (AtBeginDocument).
+\AtBeginDocument{%
+  \noindent\smash{\rule{\linewidth}{0.4pt}}\par
+}

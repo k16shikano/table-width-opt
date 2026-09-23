@@ -1,0 +1,12 @@
+/target/
+/work/
+/libpdfium.so
+/libpdfium.dylib
+/pdfium.dll
+*.so
+*.dylib
+.cargo/
+.cursor/
+.DS_Store
+*.swp
+*~

@@ -1,0 +1,18 @@
+\documentclass[uplatex,dvipdfmx,a5,sample,9pt]{lnbook}
+\ifdefined\pdfpxdimen
+   \let\sphinxpxdimen\pdfpxdimen\else\newdimen\sphinxpxdimen
+\fi \sphinxpxdimen=.75bp\relax
+\newenvironment{sphinxtheindex}{}{}
+\newenvironment{sphinxthebibliography}{}{}
+\usepackage{lncaption}
+\usepackage{tamesphinxfootnote}
+\usepackage[full]{textcomp}
+\usepackage[indent, skip=0pt]{parskip}
+\usepackage{sphinx}
+\usepackage{progo}
+\usepackage[bookmarks=false]{hyperref}
+\usepackage{pxjahyper}
+\usepackage{disablesphinxfootnote}
+\AtBeginShipoutFirst{\special{pdf:tounicode UTF8-UTF16}}
+\AtBeginDocument{\special{papersize=148truemm,210truemm}}%
+\pagestyle{empty}
