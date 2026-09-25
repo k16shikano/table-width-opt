@@ -2,9 +2,13 @@
 
 LaTeXの表環境の最適な列幅を探索するやつ。
 
+![three-col fixture の探索過程](search.gif)
+
 - `tabular`、`tabulary`、`longtable`に対応
 - 組版は`uplatex`と`dvipdfmx`が前提
 - 表の列指定子は、すべて`p{...}`（または`m{...}`）で設定される（右寄せとか必要なら列幅を最適化してから個別に`{...}>`で設定する）
+
+上のGIFは`tests/fixtures/three-col/`の表を`optimize`したときの探索順（`initial`→各`candidate-iter`→`optimized`）である。同じものは`tests/fixtures/three-col/do.sh`で再現できる。
 
 詳しいことが知りたければ`doc/SPEC.md`に何か書いてあります（エージェントによる執筆）。
 

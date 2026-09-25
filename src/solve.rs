@@ -566,23 +566,14 @@ mod tests {
     use crate::response_model::ResponseModel;
     use crate::score::analyze;
     use crate::types::{CellAlign, CellMetrics, LineMetrics, PenaltyWeights, TableMetrics};
-    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     fn two_col_metrics() -> TableMetrics {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/two-col/bad.metrics.json");
-        let json: Vec<serde_json::Value> =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        serde_json::from_value(json[0]["metrics"].clone()).unwrap()
+        crate::test_support::two_col_metrics()
     }
 
     fn three_col_metrics() -> TableMetrics {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/three-col/bad.metrics.json");
-        let json: Vec<serde_json::Value> =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        serde_json::from_value(json[0]["metrics"].clone()).unwrap()
+        crate::test_support::three_col_bad_metrics()
     }
 
     fn cell(lines: &[(&str, f64)]) -> CellMetrics {

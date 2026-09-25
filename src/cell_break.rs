@@ -1032,11 +1032,7 @@ mod tests {
 
     #[test]
     fn three_col_col0_compression_budget() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/three-col/bad.metrics.json");
-        let json: Vec<serde_json::Value> =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        let metrics: TableMetrics = serde_json::from_value(json[0]["metrics"].clone()).unwrap();
+        let metrics = crate::test_support::three_col_bad_metrics();
 
         assert!(table_has_multiline(&metrics));
         let budget = column_compression_budget(&metrics, 0);
@@ -1069,11 +1065,7 @@ mod tests {
 
     #[test]
     fn column_width_need_uses_multiline_not_only_imbalanced() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/three-col/bad.metrics.json");
-        let json: Vec<serde_json::Value> =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        let metrics: TableMetrics = serde_json::from_value(json[0]["metrics"].clone()).unwrap();
+        let metrics = crate::test_support::three_col_bad_metrics();
 
         let budget1 = column_compression_budget(&metrics, 1);
         assert!(
@@ -1088,21 +1080,20 @@ mod tests {
     #[test]
     fn cjk_header_wrap_uses_table_median_advance() {
         use crate::allocate::{column_pt_per_pc, estimate_column_content_affine};
-        use crate::observe::observe_pdf;
-        use std::path::PathBuf;
 
-        let pdf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/three-col/optimized.pdf");
-        let metrics = observe_pdf(&pdf, 0, Some(0), Some(3))
-            .expect("observe optimized")
-            .remove(0);
+        let metrics = crate::test_support::metrics_from_table_tex(
+            "three-col",
+            "|p{4pc}|p{4pc}|p{18pc}|",
+            3,
+        );
         let cell = metrics
             .cells
             .iter()
             .find(|c| c.col == 2 && c.row == 0)
             .expect("col2 row0");
+        assert_eq!(cell.lines.len(), 1, "wide col2 keeps header on one line");
         let glyphs: Vec<_> = cell.lines.iter().flat_map(|l| l.glyphs.iter()).collect();
-        assert_eq!(glyphs.len(), 14, "col2 header should be 14 glyphs");
+        assert_eq!(glyphs.len(), 21, "col2 header should be 21 glyphs");
         let cjk_advances: Vec<f64> = glyphs
             .iter()
             .filter(|g| !g.ch.is_ascii())
@@ -1136,14 +1127,8 @@ mod tests {
     #[test]
     fn row6_col1_close_cell_wrap_thresholds() {
         use crate::allocate::{column_pt_per_pc, estimate_column_content_affine};
-        use crate::observe::observe_pdf;
-        use std::path::PathBuf;
 
-        let pdf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/three-col/bad.pdf");
-        let metrics = observe_pdf(&pdf, 0, Some(0), Some(3))
-            .expect("observe bad")
-            .remove(0);
+        let metrics = crate::test_support::three_col_bad_metrics();
         let cell = metrics
             .cells
             .iter()

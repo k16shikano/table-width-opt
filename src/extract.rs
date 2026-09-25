@@ -28,9 +28,17 @@ pub fn extract_tables(source: &str) -> Result<Vec<ExtractedTable>> {
     let mut search_from = 0usize;
     while let Some((env, start, end)) = find_next_table_env(source, search_from)? {
         let body = source[start..end].to_string();
-        let colspec = extract_colspec(&body)?;
-        let columns = column_count(&colspec);
-        if columns == 0 {
+        let colspec = if body.contains("%%COLSPEC%%") {
+            "%%COLSPEC%%".to_string()
+        } else {
+            extract_colspec(&body)?
+        };
+        let columns = if colspec == "%%COLSPEC%%" {
+            0
+        } else {
+            column_count(&colspec)
+        };
+        if columns == 0 && colspec != "%%COLSPEC%%" {
             bail!(
                 "table {} has no columns in colspec `{colspec}`",
                 tables.len()

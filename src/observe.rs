@@ -382,15 +382,28 @@ fn detect_text_area(
     table_left: f64,
     table_right: f64,
 ) -> (f64, f64) {
-    if let Some((left, right)) = detect_linewidth_marker(hlines, page_height) {
+    let raw = if let Some((left, right)) = detect_linewidth_marker(hlines, page_height) {
         if right > left + 50.0 {
-            return (left, right);
+            Some((left, right))
+        } else {
+            None
         }
+    } else {
+        None
+    };
+    let (left, right) = match raw {
+        Some(pair) => pair,
+        None if table_right > table_left + 50.0 => (table_left, table_right),
+        None => (36.0, page_width - 36.0),
+    };
+    // TeX の \linewidth マーカーが PDF メディアをはみ出しているときはページ内に打ち切る。
+    let left = left.clamp(0.0, page_width);
+    let right = right.clamp(0.0, page_width);
+    if right > left + 50.0 {
+        (left, right)
+    } else {
+        (36.0, (page_width - 36.0).max(86.0))
     }
-    if table_right > table_left + 50.0 {
-        return (table_left, table_right);
-    }
-    (36.0, page_width - 36.0)
 }
 
 fn glyph_inside_table(g: &Glyph, top: f64, bottom: f64, left: f64, right: f64) -> bool {
@@ -1182,48 +1195,50 @@ mod tests {
 
     #[test]
     fn debug_hline_counts() {
-        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/three-col");
-        debug_pdf(base.join("bad.pdf").to_str().unwrap());
+        let pdf = crate::test_support::three_col_bad_pdf();
+        debug_pdf(pdf.to_str().unwrap());
     }
 
     #[test]
     fn three_col_vline_bounds_zero_overflow() {
         use crate::score::analyze;
         use crate::types::PenaltyWeights;
-        use std::path::PathBuf;
 
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/three-col");
         let weights = PenaltyWeights::default();
-        for pdf in [
-            "bad.pdf",
-            "optimized.pdf",
-            "mid/_table_width_opt.pdf",
+        for (label, metrics, require_zero_overflow) in [
+            ("bad", crate::test_support::three_col_bad_metrics(), false),
+            ("optimized", crate::test_support::three_col_optimized_metrics(), true),
+            ("mid", crate::test_support::three_col_mid_metrics(), true),
         ] {
-            let path = base.join(pdf);
-            let metrics = observe_pdf(&path, 0, Some(0), Some(3)).unwrap().remove(0);
-            assert_eq!(metrics.columns, 3, "{pdf}");
-            assert_eq!(metrics.column_bounds.len(), 4, "{pdf}");
+            assert_eq!(metrics.columns, 3, "{label}");
+            assert_eq!(metrics.column_bounds.len(), 4, "{label}");
             assert!(
                 metrics.used_vline_bounds,
-                "{pdf} should use exact vline bounds, not ink gap"
+                "{label} should use exact vline bounds, not ink gap"
             );
-            assert_eq!(metrics.vline_x_positions.len(), 4, "{pdf} vline positions");
+            assert_eq!(metrics.vline_x_positions.len(), 4, "{label} vline positions");
             let report = analyze(&metrics, &weights);
-            assert_eq!(
-                report.penalty.overflow, 0.0,
-                "{pdf} overflow={}",
-                report.penalty.overflow
-            );
+            if require_zero_overflow {
+                assert_eq!(
+                    report.penalty.overflow, 0.0,
+                    "{label} overflow={}",
+                    report.penalty.overflow
+                );
+            } else {
+                assert!(
+                    report.penalty.overflow > 0.0,
+                    "{label} should overflow on unbreakable tt token"
+                );
+            }
             let cell = metrics
                 .cells
                 .iter()
                 .find(|c| c.row == 5 && c.col == 1)
                 .expect("row5 col1");
+            let blob: String = cell.lines.iter().map(|l| l.text.as_str()).collect();
             assert!(
-                cell.lines.iter().any(|l| l.text.contains("MARKRF")),
-                "{pdf} MARKRF misplaced"
+                blob.contains("verylong"),
+                "{label} unbreakable arg misplaced: {blob:?}"
             );
         }
     }
@@ -1231,11 +1246,8 @@ mod tests {
     #[test]
     fn optimized_content_box_column_excess_near_zero() {
         use crate::objective;
-        use std::path::PathBuf;
 
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/three-col/optimized.pdf");
-        let metrics = observe_pdf(&path, 0, Some(0), Some(3)).unwrap().remove(0);
+        let metrics = crate::test_support::three_col_optimized_metrics();
         assert!(metrics.content_inset_left > 0.0);
         let obj = objective::from_metrics(&metrics);
         assert!(
@@ -1253,16 +1265,11 @@ mod tests {
 
     #[test]
     fn exact_geometry_three_column_fixture() {
-        use std::path::PathBuf;
-
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/three-col");
-        for (pdf, label) in [
-            ("bad.pdf", "bad"),
-            ("optimized.pdf", "index"),
-            ("mid/_table_width_opt.pdf", "mid"),
+        for (label, path) in [
+            ("bad", crate::test_support::three_col_bad_pdf()),
+            ("index", crate::test_support::three_col_optimized_pdf()),
+            ("mid", crate::test_support::three_col_mid_pdf()),
         ] {
-            let path = base.join(pdf);
             let layout = load_page(&path, 0).unwrap();
             let groups = find_table_hline_groups(&layout.hlines, &layout.glyphs).unwrap();
             let hlines = &groups[0];
@@ -1305,14 +1312,11 @@ mod tests {
     #[test]
     fn symmetric_inset_rescore_bad_and_optimized() {
         use crate::objective;
-        use std::path::PathBuf;
 
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/three-col");
-        for (pdf_name, label) in [("bad.pdf", "bad"), ("optimized.pdf", "optimized")] {
-            let metrics = observe_pdf(&base.join(pdf_name), 0, Some(0), Some(3))
-                .unwrap()
-                .remove(0);
+        for (label, metrics) in [
+            ("bad", crate::test_support::three_col_bad_metrics()),
+            ("optimized", crate::test_support::three_col_optimized_metrics()),
+        ] {
             assert!(
                 (metrics.content_inset_left - metrics.content_inset_right).abs() < 0.01,
                 "{label} inset asymmetric: ({}, {})",

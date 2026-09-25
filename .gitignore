@@ -1,5 +1,11 @@
 /target/
 /work/
+# fixture 組版・optimize の途中成果物（table.tex / do.sh 以外）
+/tests/fixtures/*/bad/
+/tests/fixtures/*/optimized/
+/tests/fixtures/*/mid/
+/tests/fixtures/*/optimize/
+/tests/fixtures/*/_*/
 /libpdfium.so
 /libpdfium.dylib
 /pdfium.dll

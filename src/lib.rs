@@ -16,3 +16,6 @@ pub mod response_model;
 pub mod score;
 pub mod solve;
 pub mod types;
+
+#[cfg(test)]
+mod test_support;
