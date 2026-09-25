@@ -695,6 +695,7 @@ mod tests {
                 plan.content_scale,
                 &plan.content_offset_pt,
                 0.5,
+                w_max,
             ),
             Vec::new(),
         );
@@ -741,6 +742,7 @@ mod tests {
                 plan.content_scale,
                 &plan.content_offset_pt,
                 0.5,
+                plan.w_max_pc,
             ),
             Vec::new(),
         );

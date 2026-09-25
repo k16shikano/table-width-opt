@@ -246,9 +246,7 @@ pub fn build_plan(
     config: &AllocateConfig,
 ) -> Result<AllocatePlan> {
     let mut colspec = colspec;
-    if colspec.uses_textwidth() {
-        colspec.normalize_to_pc(DEFAULT_INNER_WIDTH_PC)?;
-    }
+    colspec.normalize_to_p_pc(DEFAULT_INNER_WIDTH_PC)?;
     let widths0 = colspec.width_values()?;
     let w_in_pc: f64 = widths0.iter().sum();
     let pt_per_pc = pt_per_pc_from(metrics, w_in_pc);
@@ -533,6 +531,9 @@ fn bump_lower_for_overflow(lower: &[f64], report: &TableReport, pt_per_pc: f64) 
 /// - いまの行構成を保つ必要 content 幅（最長行）+ マージンから宣言幅床を作る。
 ///   実測インクちょうどまで縮めると、計測誤差でセル内改行が起きる。
 /// - はみ出しが観測された列は、さらに (はみ出し + 1pt) / scale を足す。
+/// - フィット床の合計が `w_max_pc` を超えるときは、右余白の大きいセルが多い列から
+///   圧縮可能床（改行を許した下限）まで下げ、版面内に収まるようにする。
+///   どの幅で何行になるかは Z3 の extra_lines / 行バランス目的が選ぶ。
 pub fn z3_hard_lower_bounds_pc(
     widths_pc: &[f64],
     metrics: &TableMetrics,
@@ -540,6 +541,7 @@ pub fn z3_hard_lower_bounds_pc(
     content_scale: f64,
     content_offset_pt: &[f64],
     w_min_pc: f64,
+    w_max_pc: f64,
 ) -> Vec<f64> {
     let mut out = vec![w_min_pc; widths_pc.len()];
     if content_scale <= 1e-9 {
@@ -576,7 +578,77 @@ pub fn z3_hard_lower_bounds_pc(
         let need = declared + (col.overflow_total + OVERFLOW_MARGIN_PT) / content_scale;
         out[col.col] = out[col.col].max(need);
     }
+
+    soften_fit_floors_to_page(&mut out, metrics, w_min_pc, w_max_pc);
     out
+}
+
+/// フィット床合計が版面上限を超えるときだけ、圧縮可能な列の床を下げる。
+fn soften_fit_floors_to_page(
+    floors_pc: &mut [f64],
+    metrics: &TableMetrics,
+    w_min_pc: f64,
+    w_max_pc: f64,
+) {
+    if w_max_pc <= 0.0 || floors_pc.is_empty() {
+        return;
+    }
+    let sum: f64 = floors_pc.iter().sum();
+    if sum <= w_max_pc + 1e-6 {
+        return;
+    }
+
+    // 版面超過時の絶対床は w_min。圧縮モデルの床はフィット床に近く、
+    // 下げ幅が足りずに版面内へ戻せないことがある。追加改行の良し悪しは
+    // Z3 の extra_lines / 行バランスが選ぶ。
+    let n = floors_pc.len();
+    let abs_floors = vec![w_min_pc; n];
+
+    let mut excess = sum - w_max_pc;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        column_right_slack_score(metrics, b)
+            .partial_cmp(&column_right_slack_score(metrics, a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for &j in &order {
+        if excess <= 1e-6 {
+            break;
+        }
+        let room = floors_pc[j] - abs_floors[j];
+        if room <= 1e-6 {
+            continue;
+        }
+        let take = excess.min(room);
+        let next = floors_pc[j] - take;
+        floors_pc[j] =
+            crate::objective::units_to_pc(crate::objective::req_pc_to_units(next)).max(abs_floors[j]);
+        excess = (floors_pc.iter().sum::<f64>() - w_max_pc).max(0.0);
+    }
+}
+
+/// 列内で右余白のあるセルほど、版面超過時の追加圧縮の優先度を上げる。
+fn column_right_slack_score(metrics: &TableMetrics, col: usize) -> f64 {
+    if col + 1 >= metrics.column_bounds.len() {
+        return 0.0;
+    }
+    let (_, content_right) = crate::objective::column_content_bounds(metrics, col);
+    let mut slack_sum = 0.0_f64;
+    let mut slack_cells = 0usize;
+    for cell in metrics.cells.iter().filter(|c| c.col == col) {
+        let end = cell
+            .lines
+            .iter()
+            .map(|line| line.advance_end().max(line.x_used))
+            .fold(0.0_f64, f64::max);
+        let slack = (content_right - end).max(0.0);
+        if slack > 0.5 {
+            slack_sum += slack;
+            slack_cells += 1;
+        }
+    }
+    slack_sum * (1.0 + slack_cells as f64)
 }
 
 fn column_ink_shares(metrics: &TableMetrics) -> Vec<f64> {
@@ -738,6 +810,10 @@ pub fn column_span_pt(metrics: &TableMetrics, col: usize) -> f64 {
 }
 
 /// sum(w_j) の上限（pc）。text area 幅から固定 overhead を引いた値。
+///
+/// 現在の宣言幅合計で下限を引き上げない。版面をはみ出している表でも
+/// `W_max` を版面内に留め、フィット床合計がそれを超えるときは
+/// `z3_hard_lower_bounds_pc` 側の追加圧縮が発火する。
 pub fn table_content_width_budget_pc(metrics: &TableMetrics, widths_pc: &[f64]) -> f64 {
     let pc_sum: f64 = widths_pc.iter().sum();
     if pc_sum <= 1e-9 {
@@ -746,7 +822,10 @@ pub fn table_content_width_budget_pc(metrics: &TableMetrics, widths_pc: &[f64]) 
     let aff = estimate_column_affine(metrics, widths_pc);
     let sum_overhead: f64 = aff.overheads.iter().sum();
     let text_w = text_area_width_pt(metrics);
-    ((text_w - sum_overhead) / aff.scale).max(pc_sum)
+    if aff.scale <= 1e-9 {
+        return pc_sum;
+    }
+    ((text_w - sum_overhead) / aff.scale).max(0.5)
 }
 
 pub fn table_max_width_pc(metrics: &TableMetrics, pc_sum: f64, pt_per_pc: f64) -> f64 {
@@ -925,5 +1004,61 @@ mod tests {
                 w_in
             );
         }
+    }
+
+    #[test]
+    fn page_overflow_softens_slacky_column_floors() {
+        let metrics = two_col_metrics();
+        let report = empty_report(&metrics);
+        let widths = vec![8.0_f64, 12.0];
+        let aff = estimate_column_content_affine(&metrics, &widths);
+        let fit_only = {
+            // w_max を十分大きくしてソフト化を抑止した床
+            z3_hard_lower_bounds_pc(
+                &widths,
+                &metrics,
+                &report,
+                aff.scale,
+                &aff.offsets,
+                0.5,
+                100.0,
+            )
+        };
+        let sum_fit: f64 = fit_only.iter().sum();
+        assert!(sum_fit > 1.0);
+        // 版面上限をフィット床合計より小さくする
+        let tight_max = (sum_fit * 0.7).max(1.0);
+        let softened = z3_hard_lower_bounds_pc(
+            &widths,
+            &metrics,
+            &report,
+            aff.scale,
+            &aff.offsets,
+            0.5,
+            tight_max,
+        );
+        let sum_soft: f64 = softened.iter().sum();
+        assert!(
+            sum_soft <= tight_max + 0.06,
+            "sum_soft={sum_soft:.2} tight_max={tight_max:.2} fit={fit_only:?} soft={softened:?}"
+        );
+        assert!(
+            softened.iter().zip(fit_only.iter()).any(|(s, f)| s + 1e-6 < *f),
+            "at least one column floor should drop under page pressure"
+        );
+    }
+
+    #[test]
+    fn content_budget_does_not_inflate_to_overflowing_pc_sum() {
+        let mut metrics = two_col_metrics();
+        // 表が版面より広い状況を模す（text area を狭くする）
+        metrics.text_area_left = 50.0;
+        metrics.text_area_right = 200.0;
+        let widths = vec![12.0_f64, 12.0]; // sum=24pc
+        let budget = table_content_width_budget_pc(&metrics, &widths);
+        assert!(
+            budget + 0.05 < 24.0,
+            "budget {budget:.2} must stay below overflowing declared sum 24pc"
+        );
     }
 }

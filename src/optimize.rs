@@ -74,9 +74,7 @@ pub fn run(
     fs::create_dir_all(work_dir)?;
     let weights = load_weights(weights_path)?;
     let mut colspec_template = ColSpec::parse(initial_colspec)?;
-    if colspec_template.uses_textwidth() {
-        colspec_template.normalize_to_pc(DEFAULT_INNER_WIDTH_PC)?;
-    }
+    colspec_template.normalize_to_p_pc(DEFAULT_INNER_WIDTH_PC)?;
     let expected_cols = colspec_template.len();
     let alloc_cfg = AllocateConfig {
         w_min_pc: config.w_min,
@@ -563,6 +561,7 @@ fn solve_iteration(
         plan.content_scale,
         &plan.content_offset_pt,
         w_min,
+        plan.w_max_pc,
     );
     let problem = solve::build_problem(
         base_metrics,
