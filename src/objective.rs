@@ -10,6 +10,9 @@ use crate::types::{CellAlign, LineMetrics, TableMetrics};
 
 const WIDTH_UNIT_PC: f64 = 0.05;
 
+/// 列内容幅の安全余白。下限、フィット誤差、受け入れ判定の三か所で同じ値を使う。
+pub const FIT_MARGIN_PT: f64 = 2.0;
+
 /// 複数行 layout の行幅レンジ（pt）。
 pub fn intra_line_imbalance_from_widths(widths: &[f64]) -> f64 {
     let ws: Vec<f64> = widths.iter().copied().filter(|w| *w > 1e-9).collect();
@@ -64,13 +67,11 @@ impl ObjectiveBreakdown {
 
     /// PDF 計測の列フィット。
     /// 隣列への罫越えは tol 超で違反。
-    /// 内容箱との余白差は、実測誤差で改行崖に落ちないよう数 pt まで許容する。
+    /// 内容箱との余白差は、下限のマージンと格子への切り上げぶんまで許容する。
     pub fn column_excess_discrete_violated(&self, pt_per_pc_col: &[f64], tol: f64) -> bool {
-        // `allocate::z3_hard_lower_bounds_pc` の FIT_MARGIN_PT と揃える。
-        const FIT_SLACK_PT: f64 = 2.0;
         if self.column_overflow_by_col.is_empty() && self.column_excess_by_col.is_empty() {
             let unit = WIDTH_UNIT_PC * pt_per_pc_col.first().copied().unwrap_or(1.0);
-            let allow = FIT_SLACK_PT.max(unit) * pt_per_pc_col.len().max(1) as f64;
+            let allow = (FIT_MARGIN_PT + unit) * pt_per_pc_col.len().max(1) as f64;
             return self.column_excess > allow + tol || self.overflow > tol;
         }
         for &over in &self.column_overflow_by_col {
@@ -80,7 +81,7 @@ impl ObjectiveBreakdown {
         }
         for (j, &ex) in self.column_excess_by_col.iter().enumerate() {
             let ppc = pt_per_pc_col.get(j).copied().unwrap_or(1.0).max(1e-9);
-            let allow = FIT_SLACK_PT.max(WIDTH_UNIT_PC * ppc);
+            let allow = FIT_MARGIN_PT + WIDTH_UNIT_PC * ppc;
             if ex > allow + tol {
                 return true;
             }
@@ -116,7 +117,9 @@ pub fn from_metrics(metrics: &TableMetrics) -> ObjectiveBreakdown {
     let mut col_max_end = vec![0.0_f64; metrics.columns];
 
     for cell in &metrics.cells {
-        extra_lines += cell.lines.len().saturating_sub(1) as f64;
+        if crate::cell_break::cell_has_wrap(cell, crate::cell_break::column_box_pt(metrics, cell.col)) {
+            extra_lines += cell.lines.len().saturating_sub(1) as f64;
+        }
         let col = cell.col;
         if col + 1 >= metrics.column_bounds.len() {
             continue;
@@ -386,7 +389,7 @@ pub fn pc_to_units(pc: f64) -> i64 {
 
 /// 必要幅（下限）を離散単位へ。過小評価で TeX が再折り返すのを防ぐため切り上げ。
 pub fn req_pc_to_units(pc: f64) -> i64 {
-    (pc / WIDTH_UNIT_PC).ceil() as i64
+    (pc / WIDTH_UNIT_PC - 1e-9).ceil() as i64
 }
 
 pub fn units_to_pc(units: i64) -> f64 {
@@ -717,5 +720,12 @@ mod tests {
         };
         let o = from_metrics(&metrics);
         assert!((o.inter_cell_slack_imbalance - 55.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn req_pc_to_units_is_stable_on_grid() {
+        for u in 1..1200 {
+            assert_eq!(req_pc_to_units(units_to_pc(u)), u, "unit {u}");
+        }
     }
 }

@@ -56,7 +56,8 @@ pub fn build_problem(
             .iter()
             .cloned()
             .collect();
-        let response = build_merged_response(cell, content_scale, offset, &samples);
+        let box_w = crate::cell_break::column_box_pt(base_metrics, cell.col);
+        let response = build_merged_response(cell, content_scale, offset, &samples, box_w);
         if response.is_empty() {
             continue;
         }
@@ -156,11 +157,12 @@ pub fn solve(problem: &WidthProblem) -> Result<Vec<WidthSolution>> {
             let line = max_line_milli_at_w(&w[j], &cell.response, &ctx);
             max_line = max_line.ge(&line).ite(&max_line, &line);
         }
-        let difference = content.clone() - max_line.clone();
+        let margin_milli = Int::from_i64(&ctx, (objective::FIT_MARGIN_PT * 1000.0).round() as i64);
+        let difference = content.clone() - margin_milli - max_line.clone();
         let absolute = difference
             .ge(&zero)
             .ite(&difference, &(-difference.clone()));
-        // フィット誤差は目的（lex 最小化）。ハード断言しない。
+        // フィット誤差は、最長行が内容幅よりマージンぶん短い幅を目標にする（lex 最小化、ハード断言しない）。
         let beyond_tolerance = absolute - unit_milli.clone();
         column_error = column_error + beyond_tolerance.ge(&zero).ite(&beyond_tolerance, &zero);
     }
@@ -351,6 +353,7 @@ fn solver_values(problem: &WidthProblem, widths: &[i64]) -> (i64, i64, i64, i64)
     let per_unit_milli =
         (problem.content_scale * objective::width_unit_pc() * 1000.0).round() as i64;
     let tolerance = per_unit_milli.max(1);
+    let margin_milli = (objective::FIT_MARGIN_PT * 1000.0).round() as i64;
     let mut column_error = 0;
     let mut extra_lines = 0;
     let mut intra = 0;
@@ -367,7 +370,7 @@ fn solver_values(problem: &WidthProblem, widths: &[i64]) -> (i64, i64, i64, i64)
             intra += layout.intra_line_imbalance_units() as i64;
             line_counts[col].push(layout.n_lines as i64);
         }
-        column_error += ((content - max_line).abs() - tolerance).max(0);
+        column_error += ((content - margin_milli - max_line).abs() - tolerance).max(0);
     }
 
     let inter = line_counts
@@ -431,6 +434,7 @@ fn column_width_candidates(
     let tolerance = per_unit_milli.max(1);
     let offset_milli =
         (problem.content_offset_pt.get(col).copied().unwrap_or(0.0) * 1000.0).round() as i64;
+    let margin_milli = (objective::FIT_MARGIN_PT * 1000.0).round() as i64;
     let mut candidates = Vec::new();
     let mut group_line = None;
     let mut group_nearest = Vec::new();
@@ -442,7 +446,7 @@ fn column_width_candidates(
             .map(|cell| layout_max_line_milli(&layout_at_width_units(&cell.response, units)))
             .max()
             .unwrap_or(0);
-        let error = (content - max_line).abs();
+        let error = (content - margin_milli - max_line).abs();
         if group_line != Some(max_line) {
             candidates.append(&mut group_nearest);
             group_line = Some(max_line);
@@ -601,7 +605,7 @@ mod tests {
     #[test]
     fn width_determines_unique_cell_response() {
         let multiline = cell(&[("abcdefghij", 50.0), ("klmnop", 30.0)]);
-        let entries = build_response_table(&multiline, 10.0, 0.0);
+        let entries = build_response_table(&multiline, 10.0, 0.0, 10.0);
         assert!(entries.len() >= 2, "need multiple breakpoints");
 
         let wide = layout_at_width_pc(&entries, 20.0, 10.0);

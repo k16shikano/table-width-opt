@@ -60,8 +60,45 @@ pub fn layout_candidate(
     }
 }
 
-pub fn pdf_cell_one_char_lines(cell: &CellMetrics) -> u32 {
+/// TeX が折り返したセルか。全行を一行に並べた幅が列の内容幅に収まるなら、
+/// 複数行に見えても折り返しではない（\vdots など縦に並ぶ記号）。
+pub fn cell_has_wrap(cell: &CellMetrics, box_w: f64) -> bool {
     if cell.lines.len() <= 1 {
+        return false;
+    }
+    let unwrapped: f64 = cell.lines.iter().map(line_content_width_pt).sum();
+    unwrapped > box_w
+}
+
+pub fn column_box_pt(metrics: &TableMetrics, col: usize) -> f64 {
+    let (left, right) = crate::objective::column_content_bounds(metrics, col);
+    (right - left).max(0.0)
+}
+
+/// 最小内容幅: 折り返しモデル（`break_allowed`）が分割できない glyph 列の最大幅。
+pub fn cell_min_content_pt(cell: &CellMetrics, box_w: f64) -> f64 {
+    let (glyphs, observed, wrap_ctx) = build_glyph_wrap_context(cell, box_w);
+    if glyphs.is_empty() {
+        return 0.0;
+    }
+    let mut widest = 0.0_f64;
+    let mut run_start = 0usize;
+    for pos in 1..=glyphs.len() {
+        if pos < glyphs.len() && break_allowed(&glyphs, pos, &observed) {
+            widest = widest.max(segment_content_width(&glyphs, run_start, pos, &wrap_ctx));
+            run_start = pos;
+        }
+    }
+    widest.max(segment_content_width(
+        &glyphs,
+        run_start,
+        glyphs.len(),
+        &wrap_ctx,
+    ))
+}
+
+pub fn pdf_cell_one_char_lines(cell: &CellMetrics, box_w: f64) -> u32 {
+    if !cell_has_wrap(cell, box_w) {
         return 0;
     }
     cell.lines
@@ -74,7 +111,7 @@ pub fn pdf_one_char_lines(metrics: &TableMetrics) -> f64 {
     metrics
         .cells
         .iter()
-        .map(|c| pdf_cell_one_char_lines(c) as f64)
+        .map(|c| pdf_cell_one_char_lines(c, column_box_pt(metrics, c.col)) as f64)
         .sum()
 }
 
@@ -156,8 +193,9 @@ pub struct CellResponseEntry {
 
 pub fn build_glyph_wrap_context(
     cell: &CellMetrics,
+    box_w: f64,
 ) -> (Vec<GlyphMetric>, HashSet<usize>, GlyphWrapContext) {
-    let observed = observed_break_positions(cell);
+    let observed = observed_break_positions(cell, box_w);
     let mut glyphs = Vec::new();
     let mut line_map = Vec::new();
     let mut observed_widths = Vec::new();
@@ -230,8 +268,9 @@ pub fn build_response_table(
     cell: &CellMetrics,
     content_scale: f64,
     content_offset_pt: f64,
+    box_w: f64,
 ) -> Vec<CellResponseEntry> {
-    let (glyphs, observed, wrap_ctx) = build_glyph_wrap_context(cell);
+    let (glyphs, observed, wrap_ctx) = build_glyph_wrap_context(cell, box_w);
     if glyphs.is_empty() {
         return vec![CellResponseEntry {
             threshold_units: 0,
@@ -439,8 +478,11 @@ fn cell_line_glyphs(line: &LineMetrics) -> Vec<GlyphMetric> {
         .collect()
 }
 
-fn observed_break_positions(cell: &CellMetrics) -> HashSet<usize> {
+fn observed_break_positions(cell: &CellMetrics, box_w: f64) -> HashSet<usize> {
     let mut breaks = HashSet::new();
+    if !cell_has_wrap(cell, box_w) {
+        return breaks;
+    }
     let mut offset = 0usize;
     for (i, line) in cell.lines.iter().enumerate() {
         let glyphs = cell_line_glyphs(line);
@@ -759,7 +801,7 @@ fn enumerate_break_layouts(
 
 /// セル内の改行レイアウト候補を glyph 実測から列挙する。
 pub fn layout_candidates(cell: &CellMetrics, col_x_left: Option<f64>) -> Vec<LayoutCandidate> {
-    let (glyphs, observed, wrap_ctx) = build_glyph_wrap_context(cell);
+    let (glyphs, observed, wrap_ctx) = build_glyph_wrap_context(cell, f64::MAX);
     if glyphs.is_empty() {
         return vec![layout_candidate(0.0, 1, vec![0], vec![0.0])];
     }
@@ -916,7 +958,7 @@ mod tests {
     #[test]
     fn width_determines_unique_layout_response() {
         let c = cell(&[("abcdefgh", 40.0), ("ijkl", 20.0)]);
-        let entries = build_response_table(&c, 10.0, 0.0);
+        let entries = build_response_table(&c, 10.0, 0.0, 10.0);
         assert!(entries.len() >= 2);
         let wide = layout_at_width_pc(&entries, 20.0, 10.0);
         let narrow = layout_at_width_pc(&entries, 4.0, 10.0);
@@ -929,7 +971,7 @@ mod tests {
     #[test]
     fn multiline_cell_has_one_line_at_wide_width_only() {
         let c = cell(&[("module.func.", 40.0), ("invoke()", 30.0)]);
-        let entries = build_response_table(&c, 10.0, 0.0);
+        let entries = build_response_table(&c, 10.0, 0.0, 10.0);
         assert!(entries.iter().any(|e| e.layout.n_lines == 1));
         assert!(entries.iter().any(|e| e.layout.n_lines == 2));
         let narrow = layout_at_width_pc(&entries, 4.0, 10.0);
@@ -955,7 +997,7 @@ mod tests {
     #[test]
     fn prefers_balanced_two_line_over_bad_break() {
         let bad = cell(&[("C言語レベルのシステムコー", 67.0), ("ル", 5.8)]);
-        let entries = build_response_table(&bad, 10.0, 0.0);
+        let entries = build_response_table(&bad, 10.0, 0.0, 10.0);
         assert!(
             entries
                 .iter()
@@ -971,7 +1013,7 @@ mod tests {
     #[test]
     fn response_width_monotonic_non_increasing_lines() {
         let c = cell(&[("abcdefgh", 80.0), ("ijklmnop", 80.0)]);
-        let entries = build_response_table(&c, 10.0, 0.0);
+        let entries = build_response_table(&c, 10.0, 0.0, 10.0);
         let mut prev_lines = u8::MAX;
         for i in 1..40 {
             let w_pc = i as f64 * 0.5;
@@ -988,7 +1030,7 @@ mod tests {
     #[test]
     fn same_width_gives_unique_layout() {
         let c = cell(&[("module.func.", 40.0), ("invoke()", 30.0)]);
-        let entries = build_response_table(&c, 10.0, 0.0);
+        let entries = build_response_table(&c, 10.0, 0.0, 10.0);
         let a = layout_at_width_pc(&entries, 12.0, 10.0);
         let b = layout_at_width_pc(&entries, 12.0, 10.0);
         assert_eq!(a.n_lines, b.n_lines);
@@ -1001,6 +1043,24 @@ mod tests {
         assert_eq!(with_one.one_char_lines, 1);
         let single = layout_candidate(50.0, 1, vec![1], vec![50.0]);
         assert_eq!(single.one_char_lines, 0);
+    }
+
+    #[test]
+    fn min_content_of_cjk_cell_is_one_glyph() {
+        let c = cell(&[("手動更新", 40.0)]);
+        let w = cell_min_content_pt(&c, 80.0);
+        assert!(w > 0.0 && w < 40.0, "{w}");
+    }
+
+    #[test]
+    fn stacked_single_glyphs_are_not_wrap() {
+        let c = cell(&[(".", 5.0), (".", 5.0), (".", 5.0)]);
+        assert!(!cell_has_wrap(&c, 80.0));
+        assert_eq!(pdf_cell_one_char_lines(&c, 80.0), 0);
+        let entries = build_response_table(&c, 10.0, 0.0, 80.0);
+        let wide = layout_at_width_pc(&entries, 8.0, 10.0);
+        assert_eq!(wide.n_lines, 1);
+        assert_eq!(wide.one_char_lines, 0);
     }
 
     #[test]
@@ -1114,7 +1174,7 @@ mod tests {
             .collect();
         let aff = estimate_column_content_affine(&metrics, &widths);
         let ppc = column_pt_per_pc(&metrics, &widths)[2];
-        let entries = build_response_table(cell, aff.scale, aff.offsets[2]);
+        let entries = build_response_table(cell, aff.scale, aff.offsets[2], 10.0);
         let declared_col2 = widths[2];
         let narrow = layout_at_width_pc(&entries, declared_col2 - 0.5, ppc);
         assert!(narrow.n_lines >= 2, "narrow should wrap");
@@ -1137,7 +1197,7 @@ mod tests {
         let widths = [11.0, 5.0, 7.0];
         let aff = estimate_column_content_affine(&metrics, &widths);
         let ppc = column_pt_per_pc(&metrics, &widths)[1];
-        let entries = build_response_table(cell, aff.scale, aff.offsets[2]);
+        let entries = build_response_table(cell, aff.scale, aff.offsets[2], 10.0);
 
         for (i, line) in cell.lines.iter().enumerate() {
             let span = line.x_used - line.x_left;

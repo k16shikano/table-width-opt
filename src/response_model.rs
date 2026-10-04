@@ -1,7 +1,8 @@
 //! PDF 反例から response 区分関数を精密化するモデル。
 
 use crate::cell_break::{
-    build_response_table, measured_layout_at_content, CellResponseEntry, LayoutCandidate,
+    build_response_table, cell_has_wrap, column_box_pt, layout_candidate,
+    measured_layout_at_content, CellResponseEntry, LayoutCandidate,
 };
 use crate::objective;
 use crate::observe::epsilon;
@@ -57,9 +58,14 @@ pub fn build_merged_response(
     content_scale: f64,
     content_offset_pt: f64,
     samples: &[ResponseSample],
+    box_w: f64,
 ) -> Vec<CellResponseEntry> {
-    let mut merged =
-        enforce_line_monotonicity(build_response_table(cell, content_scale, content_offset_pt));
+    let mut merged = enforce_line_monotonicity(build_response_table(
+        cell,
+        content_scale,
+        content_offset_pt,
+        box_w,
+    ));
     if samples.is_empty() {
         return merged;
     }
@@ -117,6 +123,10 @@ pub fn extract_pdf_samples(
         let Some(mut layout) = measured_layout_at_content(cell, content_left) else {
             continue;
         };
+        if !cell_has_wrap(cell, column_box_pt(metrics, col)) && layout.n_lines > 1 {
+            let chars: usize = layout.line_chars.iter().sum();
+            layout = layout_candidate(layout.width_pt, 1, vec![chars], vec![layout.width_pt]);
+        }
         apply_overflow_correction(cell, metrics, col, &mut layout);
         out.push((
             (cell.row, col),
@@ -188,6 +198,7 @@ mod tests {
                 w_col_pc: 5.0,
                 layout: sample_layout.clone(),
             }],
+            10.0,
         );
         let w_u = objective::pc_to_units(5.0);
         let active = entries
@@ -205,7 +216,7 @@ mod tests {
     #[test]
     fn merged_response_is_monotonic_in_lines() {
         let cell = cell_one_line("abcdefghij", 100.0);
-        let entries = build_merged_response(&cell, 10.0, 0.0, &[]);
+        let entries = build_merged_response(&cell, 10.0, 0.0, &[], 10.0);
         let mut prev = u8::MAX;
         for thr in (1..40).map(|i| objective::pc_to_units(i as f64 * 0.5)) {
             let active = entries

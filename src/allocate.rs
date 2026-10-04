@@ -1,5 +1,6 @@
 use crate::cell_break::column_lower_bounds_pc;
 use crate::colspec::{ColSpec, DEFAULT_INNER_WIDTH_PC};
+use crate::objective::FIT_MARGIN_PT;
 use crate::types::{TableMetrics, TableReport};
 use anyhow::{bail, Result};
 use std::collections::HashSet;
@@ -547,19 +548,15 @@ pub fn z3_hard_lower_bounds_pc(
     if content_scale <= 1e-9 {
         return out;
     }
-    // 実測幅ちょうどの縮めを避け、改行崖から離す。
-    const FIT_MARGIN_PT: f64 = 2.0;
+    // 最小内容幅ちょうどの縮めを避け、はみ出し崖から離す。
     const OVERFLOW_MARGIN_PT: f64 = 1.0;
 
     let ncols = widths_pc.len().min(metrics.columns);
     for col_idx in 0..ncols {
-        let (content_left, _) = crate::objective::column_content_bounds(metrics, col_idx);
+        let box_w = crate::cell_break::column_box_pt(metrics, col_idx);
         let mut need_pt = 0.0_f64;
         for cell in metrics.cells.iter().filter(|c| c.col == col_idx) {
-            for line in &cell.lines {
-                let end = line.advance_end().max(line.x_used);
-                need_pt = need_pt.max((end - content_left).max(0.0));
-            }
+            need_pt = need_pt.max(crate::cell_break::cell_min_content_pt(cell, box_w));
         }
         if need_pt > 1e-6 {
             let off = content_offset_pt.get(col_idx).copied().unwrap_or(0.0);
