@@ -1,4 +1,4 @@
-use crate::brace::find_matching_brace;
+use crate::brace::{find_matching_brace, optional_bracket};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,7 +34,9 @@ pub fn compile_table_body_quiet(
     texinputs: Option<&Path>,
     quiet: bool,
 ) -> Result<()> {
-    let table_body = inject_colspec(table_body, colspec)?;
+    let table_body = strip_captions_for_measure(table_body)?;
+    let table_body = force_left_cell_alignment(&table_body);
+    let table_body = inject_colspec(&table_body, colspec)?;
 
     let work = out_pdf
         .parent()
@@ -167,6 +169,65 @@ fn measure_rules_path(preamble: &Path) -> Option<PathBuf> {
     }
 }
 
+fn strip_captions_for_measure(tex: &str) -> Result<String> {
+    let mut out = String::with_capacity(tex.len());
+    let mut i = 0usize;
+    while i < tex.len() {
+        if tex[i..].starts_with("\\captionsetup") {
+            out.push_str("\\captionsetup");
+            i += "\\captionsetup".len();
+            continue;
+        }
+        if tex[i..].starts_with("\\caption") {
+            i += "\\caption".len();
+            if tex[i..].starts_with('*') {
+                i += 1;
+            }
+            i = skip_ws(tex, i);
+            let (_, next) = optional_bracket(tex, i)?;
+            i = skip_ws(tex, next);
+            if tex.as_bytes().get(i) == Some(&b'{') {
+                i = find_matching_brace(tex, i)? + 1;
+            }
+            i = skip_ws(tex, i);
+            if tex[i..].starts_with("\\label") {
+                i += "\\label".len();
+                i = skip_ws(tex, i);
+                if tex.as_bytes().get(i) == Some(&b'{') {
+                    i = find_matching_brace(tex, i)? + 1;
+                }
+            }
+            i = skip_ws(tex, i);
+            if tex[i..].starts_with("\\tabularnewline") {
+                i += "\\tabularnewline".len();
+            } else if tex[i..].starts_with("\\") {
+                i += 2;
+            }
+            continue;
+        }
+        let ch = tex[i..].chars().next().expect("i at char boundary");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    Ok(out)
+}
+
+fn force_left_cell_alignment(tex: &str) -> String {
+    tex.replace("\\centering", "\\raggedright")
+        .replace("\\raggedleft", "\\raggedright")
+}
+
+fn skip_ws(s: &str, mut i: usize) -> usize {
+    while i < s.len() {
+        let ch = s[i..].chars().next().expect("i at char boundary");
+        if !ch.is_whitespace() {
+            break;
+        }
+        i += ch.len_utf8();
+    }
+    i
+}
+
 fn wrap_document(preamble: &str, with_measure_rules: bool, table_body: &str) -> String {
     let measure = if with_measure_rules {
         "\\input{_measure-rules.tex}\n"
@@ -178,20 +239,18 @@ fn wrap_document(preamble: &str, with_measure_rules: bool, table_body: &str) -> 
     )
 }
 
-fn run_uplatex_dvipdfmx(
+fn run_uplatex(
     work: &Path,
-    jobname: &str,
+    tex_name: &str,
     texinputs: Option<&Path>,
     quiet: bool,
-) -> Result<()> {
-    let tex_name = format!("{jobname}.tex");
-    let log_path = work.join(format!("{jobname}.log"));
+) -> Result<std::process::ExitStatus> {
     let mut cmd = Command::new("uplatex");
     cmd.args([
         "-interaction=nonstopmode",
         "-output-directory",
         ".",
-        &tex_name,
+        tex_name,
     ])
     .current_dir(work);
     if quiet {
@@ -202,11 +261,54 @@ fn run_uplatex_dvipdfmx(
         let existing = std::env::var("TEXINPUTS").unwrap_or_default();
         cmd.env("TEXINPUTS", format!("{}//:{}", ti.display(), existing));
     }
-    let status = cmd.status().context("spawn uplatex")?;
+    cmd.status().context("spawn uplatex")
+}
+
+fn aux_has_citation(work: &Path, jobname: &str) -> bool {
+    let aux = work.join(format!("{jobname}.aux"));
+    fs::read_to_string(aux)
+        .map(|t| t.contains("\\citation"))
+        .unwrap_or(false)
+}
+
+fn run_upbibtex(work: &Path, jobname: &str, quiet: bool) -> Result<()> {
+    let mut cmd = Command::new("upbibtex");
+    cmd.arg(jobname).current_dir(work);
+    if quiet {
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    }
+    let status = cmd.status().context("spawn upbibtex")?;
     if !status.success() {
+        anyhow::bail!("upbibtex failed");
+    }
+    Ok(())
+}
+
+fn run_uplatex_dvipdfmx(
+    work: &Path,
+    jobname: &str,
+    texinputs: Option<&Path>,
+    quiet: bool,
+) -> Result<()> {
+    let tex_name = format!("{jobname}.tex");
+    let log_path = work.join(format!("{jobname}.log"));
+    let dvi = work.join(format!("{jobname}.dvi"));
+    let status = run_uplatex(work, &tex_name, texinputs, quiet)?;
+    if !status.success() && !dvi.exists() {
         anyhow::bail!("uplatex failed (see {})", log_path.display());
     }
-    let dvi = work.join(format!("{jobname}.dvi"));
+    if aux_has_citation(work, jobname) {
+        run_upbibtex(work, jobname, quiet)?;
+        let status = run_uplatex(work, &tex_name, texinputs, quiet)?;
+        if !status.success() && !dvi.exists() {
+            anyhow::bail!("uplatex failed after upbibtex (see {})", log_path.display());
+        }
+        let status = run_uplatex(work, &tex_name, texinputs, quiet)?;
+        if !status.success() && !dvi.exists() {
+            anyhow::bail!("uplatex failed on cite pass (see {})", log_path.display());
+        }
+    }
     if !dvi.exists() {
         anyhow::bail!("uplatex produced no DVI (see {})", log_path.display());
     }
@@ -240,4 +342,27 @@ fn run_uplatex_dvipdfmx(
         anyhow::bail!("dvipdfmx failed");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{force_left_cell_alignment, strip_captions_for_measure};
+
+    #[test]
+    fn minipage_centering_becomes_raggedright() {
+        let tex = "\\begin{minipage}[b]{\\linewidth}\\centering\nコスト\n\\end{minipage}";
+        let out = force_left_cell_alignment(tex);
+        assert!(out.contains("\\raggedright"));
+        assert!(!out.contains("\\centering"));
+    }
+
+    #[test]
+    fn strip_longtable_caption_row() {
+        let tex = "\\begin{longtable}{l}\n\\caption{Balanced Interleavingの入力例（\\cite{chapelle2012}の例）}\\label{tbl:interleaving_example}\\tabularnewline\n\\toprule\n順位 & ランキングA \\\\\n\\end{longtable}\n";
+        let out = strip_captions_for_measure(tex).unwrap();
+        assert!(!out.contains("\\caption"), "{out}");
+        assert!(!out.contains("Balanced Interleaving"), "{out}");
+        assert!(out.contains("順位"), "{out}");
+        assert!(out.contains("\\toprule"), "{out}");
+    }
 }

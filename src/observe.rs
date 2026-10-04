@@ -542,6 +542,26 @@ fn cluster_vline_segments(
         })
         .collect();
     out.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+    merge_close_vline_clusters(out, VLINE_PAIR_MERGE)
+}
+
+const VLINE_PAIR_MERGE: f64 = 8.0;
+
+fn merge_close_vline_clusters(clusters: Vec<VLineCluster>, min_sep: f64) -> Vec<VLineCluster> {
+    let mut out: Vec<VLineCluster> = Vec::new();
+    for c in clusters {
+        if let Some(prev) = out.last_mut() {
+            if (c.x - prev.x).abs() < min_sep {
+                let w0 = prev.coverage.max(1.0);
+                let w1 = c.coverage.max(1.0);
+                prev.x = (prev.x * w0 + c.x * w1) / (w0 + w1);
+                prev.coverage += c.coverage;
+                prev.row_hits = prev.row_hits.max(c.row_hits);
+                continue;
+            }
+        }
+        out.push(c);
+    }
     out
 }
 
@@ -981,34 +1001,34 @@ fn median_f64(vals: &[f64]) -> f64 {
     v[v.len() / 2]
 }
 
-fn calibrate_glyph_advances(table_glyphs: &[Glyph], cells: &mut [CellMetrics]) {
-    let glyph_refs: Vec<&Glyph> = table_glyphs.iter().collect();
-    let lines = glyph_lines_sorted(&glyph_refs);
+fn calibrate_glyph_advances(_table_glyphs: &[Glyph], cells: &mut [CellMetrics]) {
     let mut cjk_advances = Vec::new();
     let mut ascii_gaps = Vec::new();
     let mut ascii_tight: HashMap<char, Vec<f64>> = HashMap::new();
-    for row in &lines {
-        for w in row.windows(2) {
-            let (a, b) = (w[0], w[1]);
-            if is_cjk(a.ch) && is_cjk(b.ch) {
-                let adv = b.x0 - a.x0;
-                if adv > 0.0 {
-                    cjk_advances.push(adv);
+    for cell in cells.iter() {
+        for line in &cell.lines {
+            for w in line.glyphs.windows(2) {
+                let (a, b) = (&w[0], &w[1]);
+                if is_cjk(a.ch) && is_cjk(b.ch) {
+                    let adv = (b.x0 - a.x0).max(0.0);
+                    if adv > 0.0 {
+                        cjk_advances.push(adv);
+                    }
+                }
+                if a.ch.is_ascii() && b.ch.is_ascii() {
+                    let gap = b.x0 - (a.x0 + a.width);
+                    if gap >= 0.0 {
+                        ascii_gaps.push(gap);
+                    }
                 }
             }
-            if a.ch.is_ascii() && b.ch.is_ascii() {
-                let gap = b.x0 - a.x1;
-                if gap >= 0.0 {
-                    ascii_gaps.push(gap);
+            for g in &line.glyphs {
+                if g.ch.is_ascii() {
+                    ascii_tight
+                        .entry(g.ch)
+                        .or_default()
+                        .push(g.width.max(0.0));
                 }
-            }
-        }
-        for g in row.iter() {
-            if g.ch.is_ascii() {
-                ascii_tight
-                    .entry(g.ch)
-                    .or_default()
-                    .push((g.x1 - g.x0).max(0.0));
             }
         }
     }

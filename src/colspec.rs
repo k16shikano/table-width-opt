@@ -28,6 +28,8 @@ pub struct ColumnDef {
 pub struct ColSpec {
     pub columns: Vec<ColumnDef>,
     pub trailing_bar: bool,
+    pub at_left: bool,
+    pub at_right: bool,
 }
 
 impl ColSpec {
@@ -40,8 +42,30 @@ impl ColSpec {
             i = 1;
         }
         let mut trailing_bar = false;
+        let mut at_left = false;
+        let mut at_right = false;
         while i < bytes.len() {
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i >= bytes.len() {
+                break;
+            }
+            if bytes[i] == b'@' {
+                i += 1;
+                if bytes.get(i) == Some(&b'{') {
+                    let close = find_matching_brace(spec, i)?;
+                    i = close + 1;
+                }
+                if columns.is_empty() {
+                    at_left = true;
+                } else {
+                    at_right = true;
+                }
+                continue;
+            }
             if bytes[i] == b'|' {
+
                 if i + 1 >= bytes.len() {
                     trailing_bar = true;
                     break;
@@ -78,11 +102,16 @@ impl ColSpec {
         Ok(ColSpec {
             columns,
             trailing_bar,
+            at_left,
+            at_right,
         })
     }
 
     pub fn format(&self) -> String {
         let mut out = String::new();
+        if self.at_left {
+            out.push_str("@{}");
+        }
         for col in &self.columns {
             if col.bar_before {
                 out.push('|');
@@ -103,12 +132,22 @@ impl ColSpec {
         if self.trailing_bar {
             out.push('|');
         }
+        if self.at_right {
+            out.push_str("@{}");
+        }
         out
+    }
+
+    pub fn force_left_align(&mut self) {
+        for col in &mut self.columns {
+            col.prefix = Some(r">{\raggedright\arraybackslash}".to_string());
+        }
     }
 
     pub fn len(&self) -> usize {
         self.columns.len()
     }
+
 
     pub fn width_value(&self, col: usize) -> Result<f64> {
         match &self.columns[col].width {
@@ -289,6 +328,13 @@ fn parse_column_prefix(spec: &str, i: &mut usize) -> Result<Option<String>> {
     Ok(None)
 }
 
+fn real_coeff(text: &str) -> Option<f64> {
+    let start = text.find(r"\real{")?;
+    let rest = &text[start + r"\real{".len()..];
+    let end = rest.find('}')?;
+    rest[..end].trim().parse().ok()
+}
+
 fn parse_width_value(text: &str) -> Result<WidthValue> {
     let t = text.trim();
     if let Some(num) = t.strip_suffix("pc") {
@@ -298,15 +344,17 @@ fn parse_width_value(text: &str) -> Result<WidthValue> {
             .with_context(|| format!("bad pc width `{text}`"))?;
         return Ok(WidthValue::Pc(v));
     }
+    if let Some(v) = real_coeff(t) {
+        return Ok(WidthValue::TextWidthCoeff(v));
+    }
     if t.contains("\\textwidth") || t.contains("\\linewidth") {
         let num: String = t
             .chars()
             .take_while(|c| c.is_ascii_digit() || *c == '.')
             .collect();
-        let v: f64 = num
-            .parse()
-            .with_context(|| format!("bad textwidth width `{text}`"))?;
-        return Ok(WidthValue::TextWidthCoeff(v));
+        if let Ok(v) = num.parse::<f64>() {
+            return Ok(WidthValue::TextWidthCoeff(v));
+        }
     }
     if let Some(pc) = dimen_to_pc(t) {
         return Ok(WidthValue::Pc(pc));

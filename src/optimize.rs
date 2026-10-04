@@ -648,7 +648,12 @@ fn evaluate_colspec(
     weights: &crate::types::PenaltyWeights,
     quiet: bool,
 ) -> Result<TableReport> {
-    compile_table_body_quiet(preamble, table_body, colspec, pdf, texinputs, quiet)?;
+    let measure_colspec = {
+        let mut c = ColSpec::parse(colspec)?;
+        c.force_left_align();
+        c.format()
+    };
+    compile_table_body_quiet(preamble, table_body, &measure_colspec, pdf, texinputs, quiet)?;
     let metrics = observe_pdf(pdf, 0, Some(0), Some(expected_columns))?
         .into_iter()
         .next()
